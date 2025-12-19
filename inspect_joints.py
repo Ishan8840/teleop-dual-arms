@@ -1,10 +1,4 @@
 import mujoco
-
-MODEL_PATH = "aloha/scene.xml"
-
-model = mujoco.MjModel.from_xml_path(MODEL_PATH)
-
-print("=== JOINTS ===")
-for i in range(model.njnt):
-    j = model.joint(i)
-    print(i, j.name, "qposadr:", j.qposadr[0])
+model = mujoco.MjModel.from_xml_path("aloha/scene.xml")  # scene with your Cartesian actuators
+for i in range(model.nu):
+    print(i, mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, i))
