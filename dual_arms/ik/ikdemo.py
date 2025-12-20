@@ -1,142 +1,85 @@
-import mujoco as mj
-import numpy as np
-
-# MINK imports
-from mink.configuration import Configuration
-from mink.lie.se3 import SE3
-from mink.tasks.frame_task import FrameTask
-from mink.solve_ik import solve_ik
-from mink.limits.configuration_limit import ConfigurationLimit
 from importlib.resources import files
-
+import mujoco
+import mujoco.viewer
+import numpy as np
+import time
 
 XML_PATH = str(files("dual_arms.aloha").joinpath("aloha.xml"))
-# ---- 0. Paths / constants ----
-dt = 0.02                # control timestep (50 Hz)
 
-# ---- 1. Load MuJoCo model + data ----
-model = mj.MjModel.from_xml_path(XML_PATH)
-config = Configuration(model)          # <-- no second positional arg
-data   = config.data    
-config.update_from_keyframe("neutral_pose")
+# Load model
+m = mujoco.MjModel.from_xml_path(XML_PATH)
+d = mujoco.MjData(m)
 
-# End-effector for RIGHT arm (from your XML: <site name="right/gripper" .../>)
-EE_SITE_NAME = "right/gripper"
-EE_SITE_TYPE = "site"
+# --- KEYFRAME RESET ---
+key_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, "neutral_pose")
+mujoco.mj_resetDataKeyframe(m, d, key_id)
+mujoco.mj_forward(m, d)
 
-# Ghost visualization site we added in the XML
-GHOST_SITE_NAME = "cartesian_target"
-ghost_site_id = mj.mj_name2id(model, mj.mjtObj.
-                              mjOBJ_SITE, GHOST_SITE_NAME)
+# --- SETUP GHOST ---
+body_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, 'target')
+mocap_id = m.body_mocapid[body_id]
+effector_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, 'right/gripper')
+d.mocap_pos[mocap_id] = d.site_xpos[effector_id]
 
-# ---- 2. Define a FrameTask for the right gripper ----
-# This says: "Move the site 'right/gripper' to a target pose in the world"
-ee_task = FrameTask(
-    frame_name=EE_SITE_NAME,
-    frame_type=EE_SITE_TYPE,
-    position_cost=1.0,   # care about position
-    orientation_cost=0.0 # ignore orientation for now
-)
+# --- CRITICAL FIX: ACTUATOR MAPPING ---
+# Create a map: actuator_index -> joint_index
+# This ensures we send the correct velocity to the correct motor.
+actuator_to_joint = []
+for i in range(m.nu): # For every actuator
+    # trnid gives the ID of the object this actuator controls.
+    # The first column [i, 0] is the joint ID.
+    joint_id = m.actuator_trnid[i, 0]
+    actuator_to_joint.append(joint_id)
 
-# Basic joint position limits for safety
-limits = [ConfigurationLimit(model)]
+print(f"Mapped {len(actuator_to_joint)} actuators to their joints.")
 
+with mujoco.viewer.launch_passive(m, d) as viewer:
+    while viewer.is_running():
+        step_start = time.time()
 
-def clamp_workspace(xyz: np.ndarray) -> np.ndarray:
-    """
-    Clamp the target into a safe-ish box so we don't ask for something crazy.
-    Tune these numbers to your setup.
-    """
-    x, y, z = xyz
-    x = np.clip(x, -1.0, 1.0)
-    y = np.clip(y, -1.0, 1.0)
-    z = np.clip(z, -1.0, 1.0)
-    return np.array([x, y, z])
+        # 1. READ TARGET
+        # Use the fixed mocap lookup
+        body_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, 'target')
+        mocap_id = m.body_mocapid[body_id]
+        target_pos = d.mocap_pos[mocap_id]
 
+        # 2. READ END-EFFECTOR
+        effector_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, 'right/gripper')
+        current_pos = d.site_xpos[effector_id]
 
-def step_towards_xyz(target_xyz: np.ndarray):
-    """
-    One IK + physics step that nudges the right gripper toward target_xyz.
-    """
+        # 3. CALCULATE ERROR
+        error = target_pos - current_pos
+        
+        # Scale down error if it's too big (Prevents explosion if target is far)
+        if np.linalg.norm(error) > 0.05:
+            error = error / np.linalg.norm(error) * 0.05
 
-    # 1) Make sure the target is within some workspace
-    target_xyz = clamp_workspace(target_xyz)
+        # 4. SOLVE IK
+        jacp = np.zeros((3, m.nv))
+        jacr = np.zeros((3, m.nv))
+        mujoco.mj_jacSite(m, d, jacp, jacr, effector_id)
 
-    # 2) Move the ghost site there (visual only)
-    data.site_xpos[ghost_site_id] = target_xyz
+        # Since we only want to move the RIGHT arm, we should strictly speaking
+        # zero out the Jacobian columns for the left arm to prevent drift,
+        # but usually they are already 0 because the left arm doesn't move the right hand.
+        
+        J = jacp.reshape((3, m.nv))
+        
+        # Damped Least Squares
+        dq = J.T @ np.linalg.inv(J @ J.T + np.eye(3) * 1e-4) @ error * 5.0
 
-    # 3) Set the FrameTask target to that position (no orientation)
-    target_pose = SE3.from_translation(target_xyz)
-    ee_task.set_target(target_pose)
+        # 5. APPLY CONTROL (THE FIX)
+        # Iterate over all actuators and apply the velocity from the CORRECT joint
+        for i in range(m.nu):
+            joint_id = actuator_to_joint[i]
+            
+            # We are using Position Control Actuators (likely), so:
+            # ctrl = current_joint_angle + desired_velocity * dt
+            d.ctrl[i] = d.qpos[joint_id] + dq[joint_id] * 0.5
 
-    # 4) Update kinematics
-    config.update()
+        mujoco.mj_step(m, d)
+        viewer.sync()
 
-    # 5) Solve differential IK: get joint-space velocity v
-    v = solve_ik(
-        configuration=config,
-        tasks=[ee_task],
-        dt=dt,
-        solver="daqp",   # use whichever solver MINK supports in your env
-        damping=1e-4,      # a bit of Levenberg-Marquardt damping
-        limits=limits,
-        constraints=None,
-    )
-
-    v *= 0.01
-
-    # 6) Integrate that velocity for dt to get new joint angles
-    config.integrate_inplace(v, dt)
-    data.qpos[:] = config.q
-
-    # 7) Step MuJoCo physics once
-    mj.mj_step(model, data)
-
-target_xyz = np.array([0.2, -0.25, 0.1], dtype=float)
-
-def key_callback(keycode: int):
-    """
-    Adjust target_xyz with keyboard keys.
-
-    w/s -> x forward/back
-    a/d -> y left/right
-    r/f -> z up/down
-    """
-    global target_xyz
-
-    step = 0.1  # how much to move per key press
-
-    try:
-        ch = chr(keycode)
-    except ValueError:
-        # non-printable key
-        print("non-printable key:", keycode)
-        return
-
-    ch = ch.lower()  # handle caps / uppercase
-    print("key pressed:", keycode, repr(ch), "current target:", target_xyz)
-
-    if ch == '1':
-        target_xyz[0] += step
-    elif ch == 's':
-        target_xyz[0] -= step
-    elif ch == 'a':
-        target_xyz[1] += step
-    elif ch == 'd':
-        target_xyz[1] -= step
-    elif ch == 'r':
-        target_xyz[2] += step
-    elif ch == 'f':
-        target_xyz[2] -= step
-
-    print("updated target:", target_xyz)
-
-
-if __name__ == "__main__":
-    from mujoco import viewer
-
-    with viewer.launch_passive(model, data, key_callback=key_callback) as v:
-        while v.is_running():
-            with v.lock():               # 🔒 safe to modify data/model
-                step_towards_xyz(target_xyz)
-            v.sync()         
+        time_until_next_step = m.opt.timestep - (time.time() - step_start)
+        if time_until_next_step > 0:
+            time.sleep(time_until_next_step)
