@@ -7,7 +7,7 @@ from importlib.resources import files
 from .vision import HandTracker
 
 
-XML_PATH = str(files("dual_arms.aloha").joinpath("aloha.xml"))
+XML_PATH = str(files("dual_arms.aloha").joinpath("scene.xml"))
 
 def main():
     # 1. Initialize Robot
