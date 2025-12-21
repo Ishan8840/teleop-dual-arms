@@ -33,7 +33,7 @@ class HandTracker:
         )
 
         self.landmarker = mp.tasks.vision.HandLandmarker.create_from_options(options)
-        self.cap = cv2.VideoCapture(2)
+        self.cap = cv2.VideoCapture(0)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
