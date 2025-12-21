@@ -7,7 +7,7 @@ from importlib.resources import files
 from .vision import HandTracker
 
 
-XML_PATH = str(files("dual_arms.aloha").joinpath("scene.xml"))
+XML_PATH = str(files("dual_arms.aloha").joinpath("aloha.xml"))
 
 def main():
     # 1. Initialize Robot
@@ -69,7 +69,7 @@ def main():
             mujoco.mj_jacSite(m, d, jacp, jacr, effector_id)
             
             J = jacp.reshape((3, m.nv))
-            dq = J.T @ np.linalg.inv(J @ J.T + np.eye(3) * 1e-4) @ error * 5.0
+            dq = J.T @ np.linalg.inv(J @ J.T + np.eye(3) * 1e-4) @ error * 3.0
 
             # 3. Apply to Motors
             for i in range(m.nu):

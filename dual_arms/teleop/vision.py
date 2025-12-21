@@ -17,9 +17,9 @@ class HandTracker:
 
         self.fps = 30
         self.filters = (
-            OneEuroFilter(freq=self.fps, mincutoff=0.5, beta=0.1),
-            OneEuroFilter(freq=self.fps, mincutoff=0.5, beta=0.1),
-            OneEuroFilter(freq=self.fps, mincutoff=0.05, beta=0.0005)
+            OneEuroFilter(freq=self.fps, mincutoff=0.15, beta=0.2),
+            OneEuroFilter(freq=self.fps, mincutoff=0.15, beta=0.2),
+            OneEuroFilter(freq=self.fps, mincutoff=0.015, beta=0.02)
         )
 
         model_path = str(files("dual_arms.teleop.models").joinpath("hand_landmarker.task"))
@@ -33,7 +33,9 @@ class HandTracker:
         )
 
         self.landmarker = mp.tasks.vision.HandLandmarker.create_from_options(options)
-        self.cap = cv2.VideoCapture(0)
+        self.cap = cv2.VideoCapture(2)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
     def get_target(self):
         ret, frame = self.cap.read()
@@ -60,31 +62,30 @@ class HandTracker:
 
             p5, p17 = hand[5], hand[17]
             dist_horiz = math.sqrt(((p5.x-p17.x)*w)**2 + ((p5.y-p17.y)*h)**2)
-            z_horiz = (650.0 / dist_horiz) if dist_horiz > 0 else 9999
+            z_horiz = (668.0 / dist_horiz) if dist_horiz > 0 else 9999
 
             raw_z = min(z_vert, z_horiz)
+            norm_z = max(0.0, min(1.0, (raw_z - 4.1) / (7.6 - 4.1)))
 
             t = time.time()
             filt_x = self.filters[0](raw_x, timestamp=t)
             filt_y = self.filters[1](raw_y, timestamp=t)
-            filt_z = self.filters[2](raw_z, timestamp=t)
+            filt_z = self.filters[2](norm_z, timestamp=t)
 
-            norm_z = max(0.0, min(1.0, (filt_z - 9) / (17 - 9)))
-
-            r_y = (filt_x - 0.5) * self.SCALE_Y  
+            r_y = (filt_x - 1.0) * self.SCALE_Y  
             
             # Invert Y: 0.0 (Top) -> +Z (Up)
             r_z = (0.5 - filt_y) * self.SCALE_Z
             
             # Depth Z: 0.0 (Far) -> -X (Back)
-            r_x = -(norm_z - 0.5) * self.SCALE_X
+            r_x = -(filt_z - 0.5) * self.SCALE_X
 
             target_pos = self.ROBOT_HOME + np.array([r_y, r_x, r_z])
 
             # Draw Debug
             cx, cy = int(filt_x * w), int(filt_y * h)
             cv2.circle(frame, (cx, cy), 10, (0, 255, 0), -1)
-            cv2.putText(frame, f"x: {filt_x:.2f} y: {filt_y:.2f} Z: {norm_z:.2f}", (cx+15, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
+            cv2.putText(frame, f"x: {filt_x:.2f} y: {filt_y:.2f} Z: {filt_z:.2f}", (cx+15, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
 
         return target_pos, frame
 
