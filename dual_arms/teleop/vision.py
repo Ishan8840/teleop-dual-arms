@@ -13,7 +13,7 @@ class HandTracker:
         self.SCALE_Y = 1.0
         self.SCALE_Z = 1.0
 
-        self.ROBOT_HOME = np.array([0.3, 0.0, 0.0])
+        self.ROBOT_HOME = np.array([0.3, 0.2, 0.0])
 
         self.fps = 30
         self.filters = (
@@ -34,8 +34,8 @@ class HandTracker:
 
         self.landmarker = mp.tasks.vision.HandLandmarker.create_from_options(options)
         self.cap = cv2.VideoCapture(0)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1080)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
     def get_target(self):
         ret, frame = self.cap.read()
@@ -64,7 +64,7 @@ class HandTracker:
             
             closed_val = (math.sqrt((wp4.x-wp6.x)**2 + ((wp4.y-wp6.y)**2)) + math.sqrt((wp17.x-wp20.x)**2 + ((wp17.y-wp20.y)**2))) * 100
 
-            closed = 0.0 if closed_val < 6.5 else 4
+            closed = 0.0 if closed_val < 7.5 else 4
 
             p0, p9 = hand[0], hand[9]
             dist_vert = math.sqrt(((p0.x-p9.x)*w)**2 + ((p0.y-p9.y)*h)**2)
