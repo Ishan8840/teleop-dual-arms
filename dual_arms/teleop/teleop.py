@@ -7,7 +7,7 @@ from importlib.resources import files
 from .vision import HandTracker
 
 
-XML_PATH = str(files("dual_arms.aloha").joinpath("aloha.xml"))
+XML_PATH = str(files("dual_arms.aloha").joinpath("scene.xml"))
 
 def main():
     # 1. Initialize Robot
@@ -23,6 +23,11 @@ def main():
     body_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, 'target')
     mocap_id = m.body_mocapid[body_id]
     effector_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, 'right/gripper')
+
+    gripper_name = "right/gripper"
+    gripper_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, gripper_name)
+    
+    gripper_range = m.actuator_ctrlrange[gripper_id]
     
     # Snap ghost to initial hand position
     d.mocap_pos[mocap_id] = d.site_xpos[effector_id]
@@ -40,7 +45,7 @@ def main():
             step_start = time.time()
 
             # --- A. GET INPUT FROM VISION ---
-            target_pos, frame = tracker.get_target()
+            target_pos, closed, frame = tracker.get_target()
 
             # If we see a hand, update the ghost
             if target_pos is not None:
@@ -73,8 +78,12 @@ def main():
 
             # 3. Apply to Motors
             for i in range(m.nu):
-                jid = actuator_to_joint[i]
-                d.ctrl[i] = d.qpos[jid] + dq[jid]
+                if i == gripper_id:
+                    val = np.interp(closed, [0, 1], gripper_range)
+                    d.ctrl[i] = val
+                else:
+                    jid = actuator_to_joint[i]
+                    d.ctrl[i] = d.qpos[jid] + dq[jid]
 
             # --- C. STEP PHYSICS ---
             for _ in range(5): 
