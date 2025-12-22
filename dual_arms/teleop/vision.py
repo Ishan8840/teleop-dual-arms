@@ -13,7 +13,7 @@ class HandTracker:
         self.SCALE_Y = 1.0
         self.SCALE_Z = 1.0
 
-        self.ROBOT_HOME = np.array([0.3, 0.2, 0.0])
+        self.ROBOT_HOME = np.array([0.4, 0.2, 0.0])
 
         self.fps = 30
         self.filters = (
@@ -75,7 +75,7 @@ class HandTracker:
             z_horiz = (668.0 / dist_horiz) if dist_horiz > 0 else 9999
 
             raw_z = min(z_vert, z_horiz)
-            norm_z = max(0.0, min(1.0, (raw_z - 7) / (13 - 7)))
+            norm_z = max(0.0, min(1.0, (raw_z - 23) / (32 - 23)))
 
             t = time.time()
             filt_x = self.filters[0](raw_x, timestamp=t)
@@ -95,7 +95,7 @@ class HandTracker:
             # Draw Debug
             cx, cy = int(filt_x * w), int(filt_y * h)
             cv2.circle(frame, (cx, cy), 10, (0, 255, 0), -1)
-            cv2.putText(frame, f"{closed:.2f} x: {filt_x:.2f} y: {filt_y:.2f} Z: {filt_z:.2f}", (cx+15, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
+            cv2.putText(frame, f"{closed:.2f} x: {filt_x:.2f} y: {filt_y:.2f} Z: {raw_z:.2f}", (cx+15, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
 
         return target_pos, closed, frame
 
