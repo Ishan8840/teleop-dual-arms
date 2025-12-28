@@ -14,6 +14,23 @@ def main():
     m = mujoco.MjModel.from_xml_path(XML_PATH)
     d = mujoco.MjData(m)
 
+    H, W = 240, 426   # per-camera size (keeps it fast)
+    renderer = mujoco.Renderer(m, height=H, width=W)
+
+    # Cameras to show (must exist in the compiled model)
+    sim_cams = ["overhead_cam", "worms_eye_cam", "wrist_cam_left", "wrist_cam_right"]
+
+    # (Optional) filter to only cameras that exist, to avoid crashing if a name is missing
+    available = {mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_CAMERA, i) for i in range(m.ncam)}
+    sim_cams = [c for c in sim_cams if c in available]
+    print("Sim cameras:", sim_cams)
+
+    def render_sim_cam(cam_name):
+        cam_id = m.camera(cam_name).id
+        renderer.update_scene(d, camera=cam_id)
+        img = renderer.render()          # RGB uint8
+        return img[:, :, ::-1]
+
     # Reset Pose
     key_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, "neutral_pose")
     mujoco.mj_resetDataKeyframe(m, d, key_id)
@@ -41,6 +58,8 @@ def main():
     print("Starting Teleop... Press ESC in the Camera window to quit.")
 
     with mujoco.viewer.launch_passive(m, d) as viewer:
+        # viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+        # viewer.cam.fixed  camid = m.camera("worms_eye_cam").id
         while viewer.is_running():
             step_start = time.time()
 
@@ -57,9 +76,7 @@ def main():
                 if cv2.waitKey(1) & 0xFF == 27: # ESC to quit
                     break
 
-            # --- B. ROBOT CONTROL (IK) ---
-            
-            # 1. Calculate Error
+
             current_target = d.mocap_pos[mocap_id]
             current_hand = d.site_xpos[effector_id]
             error = current_target - current_hand
@@ -85,9 +102,25 @@ def main():
                     jid = actuator_to_joint[i]
                     d.ctrl[i] = d.qpos[jid] + dq[jid]
 
-            # --- C. STEP PHYSICS ---
             for _ in range(5): 
                 mujoco.mj_step(m, d)
+
+            if len(sim_cams) > 0:
+                frames = [render_sim_cam(c) for c in sim_cams]
+
+                if len(frames) == 1:
+                    grid = frames[0]
+                elif len(frames) == 2:
+                    grid = np.hstack(frames)
+                elif len(frames) == 3:
+                    blank = np.zeros_like(frames[0])
+                    grid = np.vstack([np.hstack(frames[:2]), np.hstack([frames[2], blank])])
+                else:  # 4+
+                    grid = np.vstack([np.hstack(frames[:2]), np.hstack(frames[2:4])])
+
+                cv2.imshow("MuJoCo Cameras", grid)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break
 
             viewer.sync()
 
