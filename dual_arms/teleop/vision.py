@@ -9,11 +9,11 @@ import numpy as np
 
 class HandTracker:
     def __init__(self):
-        self.SCALE_X = 1.0
-        self.SCALE_Y = 1.0
-        self.SCALE_Z = 1.0
+        self.SCALE_X = 0
+        self.SCALE_Y = 0
+        self.SCALE_Z = 0
 
-        self.ROBOT_HOME = np.array([0.4, 0.2, 0.0])
+        self.ROBOT_HOME = np.array([0.0, 0.0, 0.0])
 
         self.fps = 30
         self.filters = (
@@ -37,6 +37,39 @@ class HandTracker:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
+    def euclidean_distance(self, point1, point2):
+        return math.sqrt((point1.x - point2.x)**2 + (point1.y - point2.y)**2)
+
+    def is_hand_closed(self, hand):
+        wrist = hand[0]
+
+        wp8, wp6 = hand[8], hand[6]
+        wp12, wp10 = hand[12], hand[10]
+        wp16, wp14 = hand[16], hand[14]
+        wp20, wp18 = hand[20], hand[18]
+
+        dist_tip1 = self.euclidean_distance(wp8, wrist)
+        dist_pip1 = self.euclidean_distance(wp6, wrist)
+
+        dist_tip2 = self.euclidean_distance(wp12, wrist)
+        dist_pip2 = self.euclidean_distance(wp10, wrist)
+
+        dist_tip3 = self.euclidean_distance(wp16, wrist)
+        dist_pip3 = self.euclidean_distance(wp14, wrist)
+
+        dist_tip4 = self.euclidean_distance(wp20, wrist)
+        dist_pip4 = self.euclidean_distance(wp18, wrist)
+
+        index_closed = dist_tip1 < dist_pip1
+        middle_closed = dist_tip2 < dist_pip2
+        ring_closed = dist_tip3 < dist_pip3
+        pinky_closed = dist_tip4 < dist_pip4
+
+        hand_closed = index_closed or middle_closed or ring_closed or pinky_closed
+
+        return hand_closed
+
+
     def get_target(self):
         ret, frame = self.cap.read()
 
@@ -58,14 +91,14 @@ class HandTracker:
 
             raw_x, raw_y = hand[0].x, hand[0].y
 
-            wp4, wp6 = hand[4], hand[6]
-            wp17, wp20 = worldHand[17], worldHand[20]
 
-            
-            closed_val = (math.sqrt((wp4.x-wp6.x)**2 + ((wp4.y-wp6.y)**2)) + math.sqrt((wp17.x-wp20.x)**2 + ((wp17.y-wp20.y)**2))) * 100
+            # hand closing calculation
+            isClosed = self.is_hand_closed(worldHand)
 
-            closed = 0.0 if closed_val < 7.5 else 4
+            closed = 0 if isClosed else 10
 
+
+            # z value
             p0, p9 = hand[0], hand[9]
             dist_vert = math.sqrt(((p0.x-p9.x)*w)**2 + ((p0.y-p9.y)*h)**2)
             z_vert = (1000.0 / dist_vert) if dist_vert > 0 else 9999
@@ -95,7 +128,7 @@ class HandTracker:
             # Draw Debug
             cx, cy = int(filt_x * w), int(filt_y * h)
             cv2.circle(frame, (cx, cy), 10, (0, 255, 0), -1)
-            cv2.putText(frame, f"{closed:.2f} x: {filt_x:.2f} y: {filt_y:.2f} Z: {filt_z:.2f}", (cx+15, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
+            cv2.putText(frame, f"{isClosed} x: {filt_x:.2f} y: {filt_y:.2f} Z: {filt_z:.2f}", (cx+15, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
 
         return target_pos, closed, frame
 
