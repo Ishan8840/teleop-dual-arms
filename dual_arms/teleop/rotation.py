@@ -5,17 +5,13 @@ import mediapipe as mp
 from dual_arms.utils.one_euro_filter import OneEuroFilter
 from importlib.resources import files
 import numpy as np
+from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Slerp
 
 class HandOrientationTuner:
     def __init__(self):
         self.fps = 30
         
-        # ONLY Rotation Filters retained
-        self.filters_rot = (
-            OneEuroFilter(freq=self.fps, mincutoff=0.01, beta=0), # Roll
-            OneEuroFilter(freq=self.fps, mincutoff=0.01, beta=0.0), # Pitch
-            OneEuroFilter(freq=self.fps, mincutoff=0.01, beta=0.0)  # Yaw
-        )
 
         model_path = str(files("dual_arms.teleop.models").joinpath("hand_landmarker.task"))
         options = mp.tasks.vision.HandLandmarkerOptions(
@@ -31,76 +27,8 @@ class HandOrientationTuner:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-    def calculate_rotation(self, world_landmarks):
-        """
-        Calculates rotation matrix from landmarks and converts to Euler angles.
-        """
-        p0 = np.array([world_landmarks[0].x, world_landmarks[0].y, world_landmarks[0].z])
-        p9 = np.array([world_landmarks[9].x, world_landmarks[9].y, world_landmarks[9].z])
-        p5 = np.array([world_landmarks[5].x, world_landmarks[5].y, world_landmarks[5].z])
-        p17 = np.array([world_landmarks[17].x, world_landmarks[17].y, world_landmarks[17].z])
-
-        # 1. Forward Vector (Z-axis): Wrist -> Middle Finger
-        vec_forward = p9 - p0
-        vec_forward /= np.linalg.norm(vec_forward)
-
-        # 2. Across Vector (X-axis approx): Pinky -> Index
-        vec_across = p5 - p17
-        vec_across /= np.linalg.norm(vec_across)
-
-        # 3. Normal Vector (Y-axis): Up out of palm
-        vec_normal = np.cross(vec_forward, vec_across)
-        vec_normal /= np.linalg.norm(vec_normal)
-
-        # 4. Re-orthogonalize Across Vector
-        vec_across = np.cross(vec_normal, vec_forward)
-        vec_across /= np.linalg.norm(vec_across)
-
-        # 5. Rotation Matrix [Across, Normal, Forward] -> [x, y, z]
-        R = np.column_stack((vec_across, vec_normal, vec_forward))
-
-        # 6. Euler Angles (ZYX convention)
-        sy = math.sqrt(R[0, 0] * R[0, 0] + R[1, 0] * R[1, 0])
-        singular = sy < 1e-6
-
-        if not singular:
-            roll = math.atan2(R[2, 1], R[2, 2])
-            pitch = math.atan2(-R[2, 0], sy)
-            yaw = math.atan2(R[1, 0], R[0, 0])
-        else:
-            roll = math.atan2(-R[1, 2], R[1, 1])
-            pitch = math.atan2(-R[2, 0], sy)
-            yaw = 0
-            
-        return roll, pitch, yaw
-
-    def draw_orientation(self, frame, landmarks):
-        h, w, _ = frame.shape
-        def get_pt(idx):
-            lm = landmarks[idx]
-            return np.array([lm.x * w, lm.y * h, lm.z * w]) 
-
-        p0 = get_pt(0)   # Wrist
-        p5 = get_pt(5)   # Index
-        p9 = get_pt(9)   # Middle
-        p17 = get_pt(17) # Pinky
-
-        # Re-calculate vectors in pixel space for drawing
-        vec_z = p9 - p0
-        vec_z = vec_z / np.linalg.norm(vec_z) * 80 
-        vec_x = p5 - p17
-        vec_x = vec_x / np.linalg.norm(vec_x) * 80
-        vec_y = np.cross(vec_z, vec_x)
-        vec_y = vec_y / np.linalg.norm(vec_y) * 80
-
-        origin = (int(p0[0]), int(p0[1]))
-
-        # Blue: Forward (Z)
-        cv2.line(frame, origin, (int(p0[0]+vec_z[0]), int(p0[1]+vec_z[1])), (255, 0, 0), 3) 
-        # Red: Side (X)
-        cv2.line(frame, origin, (int(p0[0]+vec_x[0]), int(p0[1]+vec_x[1])), (0, 0, 255), 3)
-        # Green: Up (Y)
-        cv2.line(frame, origin, (int(p0[0]+vec_y[0]), int(p0[1]+vec_y[1])), (0, 255, 0), 3)
+        self.prev_quat = None
+        self.alpha = 0.25
 
     def get_orientation(self):
         ret, frame = self.cap.read()
@@ -112,32 +40,84 @@ class HandOrientationTuner:
         timestamp = int(time.time() * 1000)
 
         result = self.landmarker.detect_for_video(mp_image, timestamp)
-        rotation_rpy = None
+        smooth_quat = None
 
         if result.hand_landmarks:
-            hand = result.hand_landmarks[0]
-            worldHand = result.hand_world_landmarks[0]
+            hand_o = result.hand_landmarks[0]
+            hand = result.hand_world_landmarks[0]
 
-            # 1. VISUALIZE
-            self.draw_orientation(frame, hand)
+            wrist_o = hand_o[0]
 
-            # 2. CALCULATE
-            raw_roll, raw_pitch, raw_yaw = self.calculate_rotation(worldHand)
+            wrist = np.array([hand[0].x, hand[0].y, hand[0].z])
+            middle = np.array([hand[9].x, hand[9].y, hand[9].z])
+            pinky = np.array([hand[17].x, hand[17].y, hand[17].z])
 
-            # 3. FILTER
-            t = time.time()
-            filt_roll = self.filters_rot[0](raw_roll, timestamp=t)
-            filt_pitch = self.filters_rot[1](raw_pitch, timestamp=t)
-            filt_yaw = self.filters_rot[2](raw_yaw, timestamp=t)
-            
-            rotation_rpy = np.array([filt_roll, filt_pitch, filt_yaw])
+            vec_x = pinky - wrist
+            vec_x = vec_x / np.linalg.norm(vec_x)
 
-            # Display values on screen
-            cx, cy = int(hand[0].x * w), int(hand[0].y * h)
-            text = f"Roll: {filt_roll:.2f} Pitch: {filt_pitch:.2f} Yaw: {filt_yaw:.2f}"
-            cv2.putText(frame, text, (cx - 100, cy - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            # 2. Temp Vector (Wrist -> Pinky)
+            vec_temp = middle - wrist
 
-        return rotation_rpy, frame
+            # 3. Z-Axis (Normal): X cross Temp
+            vec_z = np.cross(vec_x, vec_temp)
+            nz = np.linalg.norm(vec_z)
+
+            if nz < 1e-4:
+                return None, frame  # or reuse last rotation
+
+            vec_z /= nz
+
+            # 4. Y-Axis (Ortho): Z cross X
+            # This ensures Y is perfectly 90 degrees to X and Z
+            vec_y = np.cross(vec_z, vec_x)
+            vec_y = vec_y / np.linalg.norm(vec_y)
+
+            # 5. Build Rotation Matrix
+            # Stack them as columns: [x, y, z]
+            rot_matrix = np.column_stack((vec_x, vec_y, vec_z))
+
+            # 6. Convert to Quaternion [x, y, z, w]
+            r = R.from_matrix(rot_matrix)
+            quat = r.as_quat()
+
+            # after quat = r.as_quat()
+
+            if self.prev_quat is not None:
+                if np.dot(self.prev_quat, quat) < 0:
+                    quat = -quat
+
+            if self.prev_quat is None:
+                smooth_quat = quat
+            else:
+                # 2) slerp smoothing
+                key_rots = R.from_quat([self.prev_quat, quat])
+                slerp = Slerp([0, 1], key_rots)
+                smooth_quat = slerp([self.alpha])[0].as_quat()
+
+            self.prev_quat = smooth_quat
+            r_smooth = R.from_quat(smooth_quat)
+            rot_matrix = r_smooth.as_matrix()
+
+            # use rot_matrix columns for drawing (vec_x, vec_y, vec_z)
+            vec_x, vec_y, vec_z = rot_matrix[:,0], rot_matrix[:,1], rot_matrix[:,2]
+
+
+            # --- VISUALIZATION (2D) ---
+            origin = (int(hand_o[0].x * w), int(hand_o[0].y * h))
+            scale = 150
+
+            # Draw X (Red), Y (Green), Z (Blue)
+            # We access the columns of the matrix for the axes
+            cv2.line(frame, origin, (int(origin[0] + vec_x[0]*scale), int(origin[1] + vec_x[1]*scale)), (0, 0, 255), 3)
+            cv2.line(frame, origin, (int(origin[0] + vec_y[0]*scale), int(origin[1] + vec_y[1]*scale)), (0, 255, 0), 3)
+            cv2.line(frame, origin, (int(origin[0] + vec_z[0]*scale), int(origin[1] + vec_z[1]*scale)), (255, 0, 0), 3)
+
+            # Display the Quaternion numbers
+            text = f"Q: [{quat[0]:.2f}, {quat[1]:.2f}, {quat[2]:.2f}, {quat[3]:.2f}]"
+            cv2.putText(frame, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+
+        return smooth_quat, frame
 
     def close(self):
         self.cap.release()
@@ -148,12 +128,7 @@ def main():
     while True:
         rotation, frame = tuner.get_orientation()
         
-        if frame is not None:
-            cv2.imshow("Orientation Tuner", frame)
-            
-        if rotation is not None:
-            # Print to console for easy reading
-            print(f"R: {rotation[0]:.2f} | P: {rotation[1]:.2f} | Y: {rotation[2]:.2f}")
+        cv2.imshow('Step 1: Raw Vectors', frame)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
