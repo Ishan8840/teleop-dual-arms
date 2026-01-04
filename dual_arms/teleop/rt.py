@@ -4,9 +4,16 @@ import mujoco
 import mujoco.viewer
 import cv2
 from importlib.resources import files
+from .rotation import HandOrientationTuner
+from scipy.spatial.transform import Rotation as R
 
 
 XML_PATH = str(files("dual_arms.aloha").joinpath("scene.xml"))
+
+def xyzw_to_wxyz(q):
+    # scipy gives (x,y,z,w), mujoco wants (w,x,y,z)
+    return np.array([q[3], q[0], q[1], q[2]])
+
 
 def main():
     # 1. Initialize Robot
@@ -50,10 +57,44 @@ def main():
     # Map Actuators
     actuator_to_joint = [m.actuator_trnid[i, 0] for i in range(m.nu)]
 
+    print("Initializing Webcam...")
+    tuner = HandOrientationTuner()
+    print("Webcam Ready.")
+
+    R_offset = None
+    calibrated = False
 
     with mujoco.viewer.launch_passive(m, d) as viewer:
         while viewer.is_running():
             step_start = time.time()
+
+            quat, webcam_frame = tuner.get_orientation()
+
+            # Extract hand rotation
+            if quat is not None:
+                R_hand = R.from_quat(quat)  # scipy: quat is (x,y,z,w)
+
+                # --- CALIBRATION (press 'c') ---
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('c') or (not calibrated and R_offset is None):
+                    # mocap current orientation in MuJoCo is wxyz
+                    mj_q = d.mocap_quat[mocap_id].copy()
+                    # convert MuJoCo wxyz -> scipy xyzw
+                    mj_q_xyzw = np.array([mj_q[1], mj_q[2], mj_q[3], mj_q[0]])
+                    R_mj0 = R.from_quat(mj_q_xyzw)
+
+                    R_offset = R_mj0 * R_hand.inv()
+                    calibrated = True
+                    print("✅ Calibrated offset.")
+
+                if R_offset is not None:
+                    R_final = R_offset * R_hand
+                    q_xyzw = R_final.as_quat()
+                    d.mocap_quat[mocap_id] = xyzw_to_wxyz(q_xyzw)
+
+
+            if webcam_frame is not None:
+                cv2.imshow("Webcam Feed", webcam_frame)
 
 
             for _ in range(5): 
