@@ -9,11 +9,11 @@ import numpy as np
 
 class HandTracker:
     def __init__(self):
-        self.SCALE_X = 0
-        self.SCALE_Y = 0
-        self.SCALE_Z = 0
+        self.SCALE_X = 0.8
+        self.SCALE_Y = 0.8
+        self.SCALE_Z = 0.8
 
-        self.ROBOT_HOME = np.array([0.0, 0.0, 0.0])
+        self.ROBOT_HOME = np.array([0.5, 0.0, 0.0])
 
         self.fps = 30
         self.filters = (
